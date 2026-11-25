@@ -13,8 +13,9 @@ import socket
 import sys
 import time
 from pathlib import Path
-
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+from get_path import get_abs_path
+LOG_FORMAT =logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
 
 
 class TcpHandler(logging.Handler):
@@ -35,7 +36,7 @@ class TcpHandler(logging.Handler):
                 self.sock = socket.create_connection((self.host, self.port), timeout=0.5)
             text = self.format(record) + "\n"
             self.sock.sendall(text.encode("utf-8"))
-        except OSError:
+        except Exception:
             self.sock = None
             self.next_try = time.time() + 10  # 10 秒内不再重连，免得每条日志都卡 0.5 秒
 
@@ -43,14 +44,21 @@ class TcpHandler(logging.Handler):
         if self.sock is not None:
             try:
                 self.sock.close()
-            except OSError:
+            except Exception:
                 pass
             self.sock = None
         super().close()
 
 
 def setup_logger(log_dir=None, use_tcp=True, tcp_host="127.0.0.1", tcp_port=9100):
-    """创建 logger：控制台 + 文件 + TCP，三个 handler 都是 DEBUG（最低级别）。"""
+    """
+    创建 logger：控制台 + 文件 + TCP，三个 handler 都是 DEBUG（最低级别
+    :param log_dir:
+    :param use_tcp:
+    :param tcp_host:
+    :param tcp_port:
+    :return:
+    """
     if log_dir is None:
         log_dir = Path(__file__).resolve().parent / "logs"
     log_dir = Path(log_dir)
