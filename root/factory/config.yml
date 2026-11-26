@@ -1,0 +1,15 @@
+host: 127.0.0.1
+port: 9000
+connect_timeout: 3.0
+response_timeout: 8.0
+# 是否强制使用 Mock
+# 写 false 时用 DeepSeek；但如果电脑没设置环境变量 DEEPSEEK_API_KEY，程序也会自动退回 Mock
+mock: false
+# once: "去迷宫右下角"
+# 留空表示进入交互模式，可以一句一句地输入指令
+once:
+# 是否只做离线自检：true 表示不连 C 端、不调大模型，只检查小函数，检查完退出
+# 想自检时改成 true，自检完记得改回 false，否则程序不会进入正常对话
+selftest: false
+# 日志文件路径；留空表示用默认路径 root/log/robot_日期.log
+log_file:
