@@ -1,15 +1,17 @@
 """主程序（简化版）：输入中文指令 -> 大模型解析目标坐标 -> 通过 TCP 发给 C 端 -> 打印路径 
 
-四个文件的分工：
+四个文件 + 一个配置文件的分工：
 - main.py         主流程：交互对话、调用大模型、调用 TCP、打印结果
 - llm_client.py   大模型：DeepSeek / Mock，few-shot 示例，JSON 解析
 - tcp_client.py   和 C 端寻路程序通信
 - logger_setup.py 日志：DEBUG 级别，控制台 + 文件 + TCP
-
+- config.yml      配置文件：以前写在命令行参数里的设置（host、port、mock、超时、日志等）都放这里
 """
-import argparse
 import json
 import os
+from pathlib import Path
+
+import yaml
 
 from llm_client import get_decision
 from logger_setup import setup_logger
@@ -40,9 +42,9 @@ def new_state():
     return {"history": [], "last_target": None, "task_state": "空闲"}
 
 
-def handle_instruction(text, state, args, logger, use_mock):
-    """处理一条用户指令 """
-    logger.info("用户指令：%s", text)
+def handle_instruction(text, state, config, logger, use_mock):
+    """处理一条用户指令（config 就是从 config.yml 读出来的字典） """
+    logger.info(f"用户指令：{text}")
     state["task_state"] = "解析指令中"
 
     try:
@@ -54,20 +56,20 @@ def handle_instruction(text, state, args, logger, use_mock):
             use_mock=use_mock,
             logger=logger,
         )
-    except Exception as exc:
-        logger.error("解析指令失败：%s", exc)
-        print("调用大模型失败：%s" % exc)
+    except Exception as e:
+        logger.error(f"解析指令失败：{e}")
+        print(f"调用大模型失败：{e}")
         state["task_state"] = "失败"
         return
 
-    logger.debug("模型解析结果：%s", json.dumps(decision, ensure_ascii=False))
+    logger.debug(f"模型解析结果：{json.dumps(decision, ensure_ascii=False)}")
     # 把这一轮对话记到历史里，下一轮模型就能看到
     state["history"].append((text, json.dumps(decision, ensure_ascii=False)))
 
     action = decision["action"]
     reply = decision["reply"]
 
-    if action == "clarify":
+    if action == "unclear":
         print(reply or "我没听清，请再说一下具体位置 ")
         state["task_state"] = "等待补充"
         return
@@ -77,19 +79,19 @@ def handle_instruction(text, state, args, logger, use_mock):
         state["task_state"] = "已停止"
         return
 
-    # action == "navigate"：请求 C 端寻路
     target_x = decision["target_x"]
     target_y = decision["target_y"]
     state["task_state"] = "请求 C 端寻路"
 
     try:
+        # 以前这里是 args.host / args.port，现在改成从 config.yml 里读
         report = send_target(
-            host=args.host,
-            port=args.port,
+            host=config["host"],
+            port=config["port"],
             target_x=target_x,
             target_y=target_y,
-            connect_timeout=args.connect_timeout,
-            response_timeout=args.response_timeout,
+            connect_timeout=config["connect_timeout"],
+            response_timeout=config["response_timeout"],
             logger=logger,
         )
     except Exception as e:
@@ -124,55 +126,95 @@ def run_selftest():
     check("Mock：相对移动", mock_decision("再往左一格", (5, 5))["target_y"] == 4)
     check(
         "JSON 解析",
-        parse_json('```json\n{"action":"navigate","target_x":3,"target_y":2}\n```')["target_x"] == 3,
+        parse_json('```json\n{"action":"intent","target_x":3,"target_y":2}\n```')["target_x"] == 3,
     )
     check(
         "路径格式化",
         format_path([{"x": 0, "y": 0}, {"x": 1, "y": 1}]) == "已规划路线：(0,0)->(1,1)，共 1 步 ",
     )
-    print("自检结果：%d/%d 通过" % (sum(checks), len(checks)))
+    print(f"自检结果：{sum(checks)}/{len(checks)} 通过")
     return 0 if all(checks) else 1
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description="简化版小车大脑端")
-    parser.add_argument("--host", default=os.environ.get("EASY_C_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("EASY_C_PORT", "9000")))
-    parser.add_argument("--mock", action="store_true", help="强制使用 Mock 大模型")
-    parser.add_argument("--once", default=None, help="只执行一条指令后退出")
-    parser.add_argument("--selftest", action="store_true", help="离线自检")
-    parser.add_argument("--connect-timeout", type=float, default=3.0)
-    parser.add_argument("--response-timeout", type=float, default=8.0)
-    parser.add_argument("--connect-retries", type=int, default=1, help="简化版保留参数，暂不重试")
-    parser.add_argument("--log-dir", default=None, help="日志目录")
-    parser.add_argument("--log-tcp-port", type=int, default=9100, help="TCP 日志服务端口，默认 9100")
-    parser.add_argument("--no-log-tcp", action="store_true", help="不通过 TCP 发日志")
-    return parser
+# 现在这些参数都改成从同目录的 config.yml 里读，这段代码保留下来当参考，
+# 方便对照：以前的命令行参数分别对应 config.yml 里的哪一项。
+# def build_parser():
+#     parser = argparse.ArgumentParser(description="简化版小车大脑端")
+#     parser.add_argument("--host", default=os.environ.get("EASY_C_HOST", "127.0.0.1"))
+#     parser.add_argument("--port", type=int, default=int(os.environ.get("EASY_C_PORT", "9000")))
+#     parser.add_argument("--mock", action="store_true", help="强制使用 Mock 大模型")
+#     parser.add_argument("--once", default=None, help="只执行一条指令后退出")
+#     parser.add_argument("--selftest", action="store_true", help="离线自检")
+#     parser.add_argument("--connect-timeout", type=float, default=3.0)
+#     parser.add_argument("--response-timeout", type=float, default=8.0)
+#     parser.add_argument("--connect-retries", type=int, default=1, help="简化版保留参数，暂不重试")
+#     parser.add_argument("--log-file", default=None, help="日志目录")
+#     parser.add_argument("--log-tcp-port", type=int, default=9100, help="TCP 日志服务端口，默认 9100")
+#     parser.add_argument("--no-log-tcp", action="store_true", help="不通过 TCP 发日志")
+#     return parser
+
+
+# 默认配置：如果 config.yml 里漏写了某一项，就用这里的值补上，程序不会因为少一行就报错
+DEFAULT_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "connect_timeout": 3.0,
+    "response_timeout": 8.0,
+    "mock": False,
+    "once": None,
+    "selftest": False,
+    "log_file": None,
+}
+
+
+def load_config():
+    """读取和本文件同目录的 config.yml，返回一个字典 """
+    # 获取当前代码文件所在目录
+    current_dir = Path(__file__).resolve().parent
+    # 假设 config.yml 和当前代码在同一个目录
+    yml_path = current_dir / "config.yml"
+
+    with open(yml_path, "r", encoding="utf-8") as f:
+        file_config = yaml.safe_load(f)  # 推荐使用 safe_load 替代 load(f, Loader=...)
+
+    # config.yml 是空文件时，safe_load 会返回 None，这里先当成空字典，避免后面报错
+    if file_config is None:
+        file_config = {}
+
+    config = DEFAULT_CONFIG.copy()  # 先复制一份默认配置
+    config.update(file_config)      # 再用 config.yml 里的值覆盖默认值
+    return config
+
+
+# 程序一启动就把配置读进来，下面的函数直接用 config["host"] 这样取值
+config = load_config()
 
 
 def main():
-    args = build_parser().parse_args()
+    # args = build_parser().parse_args()  # 旧版：解析命令行参数；现在改成读 config.yml
     logger = setup_logger(
-        log_dir=args.log_dir, use_tcp=not args.no_log_tcp, tcp_port=args.log_tcp_port
+        log_file=config["log_file"],
     )
-    logger.info(f"程序启动：host={args.host} port={args.port} mock={args.mock}")
+    logger.info(f"程序启动：host={config['host']} port={config['port']} mock={config['mock']}")
 
-    if args.selftest:
+    if config["selftest"]:
         return run_selftest()
 
-    use_mock = args.mock or not os.environ.get("DEEPSEEK_API_KEY")
+    # 配置文件里 mock 为 true，或者电脑没设置 DEEPSEEK_API_KEY，都使用 Mock 模式
+    use_mock = config["mock"] or not os.environ.get("DEEPSEEK_API_KEY")
     logger.info(f"大模型模式：{'Mock' if use_mock else 'DeepSeek'}")
 
     state = new_state()
 
-    if args.once is not None:
-        handle_instruction(args.once, state, args, logger, use_mock)
+    # once 不为空：只执行这一条指令（来自 config.yml），执行完就退出
+    if config["once"] is not None:
+        handle_instruction(config["once"], state, config, logger, use_mock)
         return 0
 
     print(HELP_TEXT)
     while True:
         try:
-            text = input("指令> ").strip()
+            text = input("指令>\n ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -193,7 +235,7 @@ def main():
             state = new_state()
             print("已清空对话和状态 ")
             continue
-        handle_instruction(text, state, args, logger, use_mock)
+        handle_instruction(text, state, config, logger, use_mock)
 
     logger.info("程序退出")
     return 0
